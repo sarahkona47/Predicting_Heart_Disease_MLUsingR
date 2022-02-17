@@ -1,4 +1,4 @@
-# Predicting Heart Disease - RStudio
+# Predicting Heart Disease - Machine Learning Using R
 
 Author: Sarah Choi, Sophoa Oldfield, Brett Hungsanger
 

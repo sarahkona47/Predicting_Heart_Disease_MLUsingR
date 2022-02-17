@@ -1,0 +1,494 @@
+---
+title: "Project Code Appendix: Predicting Heart Disease"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+**Team Members:** Sarah Choi, Sophie Oldfield, Brett Hunsanger
+
+# Regression Task 
+***Goal:*** To accurately predict an individual’s resting blood pressure (RestingBP) using all 12 predictors in our data set using OLS, LASSO, and GAM.
+
+## Reading in Data
+
+```{r} 
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, warning = FALSE, message = FALSE, tidy = TRUE)
+
+# library statements 
+library(dplyr)
+library(readr)
+library(broom)
+library(ggplot2)
+library(tidymodels) 
+tidymodels_prefer() 
+library(binaryLogic)
+library(cluster)
+
+#read in data
+heart <- read.csv("C:\\Users\\choiy\\OneDrive\\Desktop\\STAT 253\\heart.csv")
+```
+
+```{r}
+#data cleaning
+
+heart <- transform(heart, RestingBP = as.numeric(RestingBP)) %>% # transforms RestingBP (response variable) to a quantitative(double) variable 
+mutate(measuredChol = Cholesterol > 0)
+  
+heart %>%
+    summarise(typeof(RestingBP))
+```
+
+```{r}
+#Creation of cv folds
+
+set.seed(3)  
+
+heart_cv15 <- vfold_cv(heart, v = 15) #15 because that divide the data set evenly 
+
+```
+
+```{r}
+#Model spec: OLS and LASSO
+
+lm_spec <-
+    linear_reg() %>% 
+    set_engine(engine = 'lm') %>% 
+    set_mode('regression')
+
+
+lm_lasso_spec <- 
+  linear_reg() %>%
+  set_args(mixture = 1, penalty = tune()) %>% ## mixture = 1 indicates Lasso
+  set_engine(engine = 'glmnet') %>% #note we are using a different engine
+  set_mode('regression') 
+
+```
+
+```{r}
+# recipes & workflows
+
+data_rec <- recipe(RestingBP ~ ., data = heart) %>% 
+    step_nzv(all_predictors()) %>% # removes variables with the same value
+    step_normalize(all_numeric_predictors()) %>%  # important standardization step for LASSO
+    step_dummy(all_nominal_predictors())  # creates indicator variables for categorical variables
+
+# Workflow (Recipe + Model)
+lasso_wf <- workflow() %>% 
+  add_recipe(data_rec) %>%
+  add_model(lm_lasso_spec)
+
+lm_wf <- workflow() %>% 
+  add_recipe(data_rec) %>%
+  add_model(lm_spec)
+```
+
+```{r}
+#Fit & tune models
+
+# Fit Model
+lm_fit <- lm_wf %>% 
+  fit(data = heart) # Fit to data
+
+# Tune  model
+penalty_grid <- grid_regular(
+  penalty(range = c(-1, 1)), 
+  levels = 30)
+
+tune_output <- tune_grid( # new function for tuning parameters
+  lasso_wf, # workflow
+  resamples = heart_cv15, # cv folds
+  metrics = metric_set(rmse, mae),
+  grid = penalty_grid # penalty grid defined above
+)
+```
+
+## Calculate/collect CV metrics
+
+```{r}
+# Visualize Model Evaluation Metrics from Tuning
+autoplot(tune_output) + theme_classic()
+
+# Summarize Model Evaluation Metrics (CV)
+collect_metrics(tune_output) %>%
+  filter(.metric == 'rmse') %>% # or choose mae
+  select(penalty, rmse = mean) 
+
+tune_output%>%
+  collect_metrics(summarise = TRUE)
+
+best_penalty <- select_by_one_std_err(tune_output,metric='mae',desc(penalty))
+
+# Fit Final Model
+final_wf <- finalize_workflow(lasso_wf, best_penalty) # incorporates penalty value to workflow
+
+final_fit <- fit(final_wf, data = heart)
+
+tidy(final_fit)
+
+tune_output%>%
+  collect_metrics(summarise = TRUE) %>%   filter(penalty==best_penalty$penalty)
+```
+
+## Visual residuals
+```{r}
+# Residual plot explorations
+mod_initial_output <- final_fit %>% 
+    predict(new_data = heart) %>% #this function maintains the row order of the new_data
+    bind_cols(heart) %>%
+    mutate(resid = RestingBP - .pred)
+
+head(mod_initial_output)
+
+# Residuals vs. predictions
+ggplot(mod_initial_output, aes(x = .pred, y = resid)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(x = 'Fitted Values', y = 'Residuals') +
+    theme_classic()
+
+
+# Residuals vs. our quantitative predictors
+
+## Age
+Age1 <- ggplot(mod_initial_output, aes(x = Age, y = resid)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(x = 'Age', y = 'Residuals') +
+    theme_classic()
+
+## Cholesterol
+Cholesterol1 <- ggplot(mod_initial_output, aes(x = Cholesterol, y = resid)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(x = 'Cholesterol', y = 'Residuals') +
+    theme_classic()
+
+## MaxHR
+MaxHR1 <- ggplot(mod_initial_output, aes(x = MaxHR, y = resid)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(x = 'Max Heart Rate', y = 'Residuals') +
+    theme_classic()
+
+## Oldpeak
+Oldpeak1 <- ggplot(mod_initial_output, aes(x = Oldpeak, y = resid)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") +
+    labs(x = 'Old peak (Heart rate variation based on Activity Intensity)', y = 'Residuals') +
+    theme_classic()
+```
+
+## Exploring Variable Importance
+```{r}
+# Penalty Term vs. Lambda 
+lasso_fit_heart <- final_fit %>% 
+  fit(data = heart) # Fit to entire data set (for now)
+
+tidy(lasso_fit_heart) # penalty = 0; equivalent to lm
+
+plot(lasso_fit_heart %>% extract_fit_parsnip() %>% pluck('fit'), # way to get the original glmnet output
+     xvar = "lambda")
+
+
+# Sorts variable by order of importance 
+glmnet_output <- final_fit %>% extract_fit_parsnip() %>% pluck('fit') # way to get the original glmnet output
+
+# Create a boolean matrix (predictors x lambdas) of variable exclusion
+bool_predictor_exclude <- glmnet_output$beta==0
+
+# Loop over each variable
+var_imp <- sapply(seq_len(nrow(bool_predictor_exclude)), function(row) {
+    # Extract coefficient path (sorted from highest to lowest lambda)
+    this_coeff_path <- bool_predictor_exclude[row,]
+    # Compute and return the # of lambdas until this variable is out forever
+    ncol(bool_predictor_exclude) - which.min(this_coeff_path) + 1
+})
+
+# Create a dataset of this information and sort
+var_imp_data <- tibble(
+    var_name = rownames(bool_predictor_exclude),
+    var_imp = var_imp
+)
+var_imp_data %>% arrange(desc(var_imp))
+
+```
+
+# Classification Task 
+
+***Goal:*** To accurately predict an individual’s likelihood of getting heart disease (HeartDisease) based on predictors using logistic regression with LASSO and Random forest algorithm 
+
+```{r}
+heart <- transform(heart, RestingBP = as.numeric(RestingBP)) %>% # transforms RestingBP (response variable) to a quantitative(double) variable 
+mutate(measuredChol = Cholesterol > 0) %>%
+  mutate(HeartDisease_binary= ifelse(heart$HeartDisease==1,'true','false'))
+```
+
+## Logistic Regression with LASSO
+
+```{r}
+# Make sure you set reference level (to the outcome you are NOT interested in)
+heart <- heart %>%
+  mutate(HeartDisease_binary = relevel(factor(HeartDisease_binary), ref='false')) #set reference level
+
+data_cv10 <- vfold_cv(heart, v = 10)
+
+# Logistic LASSO Regression Model Spec
+logistic_lasso_spec_tune <- logistic_reg() %>%
+    set_engine('glmnet') %>%
+    set_args(mixture = 1, penalty = tune()) %>%
+    set_mode('classification')
+
+# Recipe
+logistic_rec <- recipe(HeartDisease_binary ~ ., data = heart) %>%
+  step_rm(HeartDisease) %>% 
+    step_normalize(all_numeric_predictors())  %>% 
+    step_dummy(all_nominal_predictors())
+
+# Workflow (Recipe + Model)
+log_lasso_wf <- workflow() %>% 
+    add_recipe(logistic_rec) %>%
+    add_model(logistic_lasso_spec_tune) 
+
+# Tune Model (trying a variety of values of Lambda penalty)
+penalty_grid <- grid_regular(
+  penalty(range = c(-5, 1)), #log10 transformed  (kept moving min down from 0)
+  levels = 100)
+
+tune_output <- tune_grid( 
+  log_lasso_wf, # workflow
+  resamples = data_cv10, # cv folds
+  metrics = metric_set(roc_auc,accuracy),
+  control = control_resamples(save_pred = TRUE, event_level = 'second'),
+  grid = penalty_grid # penalty grid defined above
+)
+
+# Visualize Model Evaluation Metrics from Tuning
+autoplot(tune_output) + theme_classic()
+```
+
+### Inspecting the Model
+```{r}
+best_se_penalty <- select_by_one_std_err(tune_output, metric = 'accuracy', desc(penalty)) # choose penalty value based on the largest penalty within 1 se of the highest CV roc_auc
+best_se_penalty
+```
+
+```{r}
+final_fit_se <- finalize_workflow(log_lasso_wf, best_se_penalty) %>% # incorporates penalty value to workflow 
+    fit(data = heart)
+
+final_fit_se %>% tidy()
+```
+
+### Variable Importance
+
+```{r}
+glmnet_output <- final_fit_se %>% extract_fit_engine()
+    
+# Create a boolean matrix (predictors x lambdas) of variable exclusion
+bool_predictor_exclude <- glmnet_output$beta==0
+
+# Loop over each variable
+var_imp <- sapply(seq_len(nrow(bool_predictor_exclude)), function(row) {
+    # Extract coefficient path (sorted from highest to lowest lambda)
+    this_coeff_path <- bool_predictor_exclude[row,]
+    # Compute and return the # of lambdas until this variable is out forever
+    ncol(bool_predictor_exclude) - which.min(this_coeff_path) + 1
+})
+
+# Create a dataset of this information and sort
+var_imp_data <- tibble(
+    var_name = rownames(bool_predictor_exclude),
+    var_imp = var_imp
+)
+var_imp_data %>% arrange(desc(var_imp))
+```
+
+### CV results for "best lambda"
+```{r}
+tune_output %>%
+    collect_metrics() %>%
+    filter(penalty == best_se_penalty %>% pull(penalty))
+```
+
+### Using Final Model (Choosing Threshold)
+```{r}
+final_output <- final_fit_se %>% predict(new_data = heart, type='prob') %>% bind_cols(heart)
+
+final_output %>%
+  ggplot(aes(x = HeartDisease_binary, y = .pred_true)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0.5, color='red') +  # change threshold
+  labs(y = 'Predicted Probability of Heart Disease', x = 'Observed Outcome') +
+  theme_classic()
+```
+
+## Random Forests
+```{r}
+# Model Specification
+rf_spec <- rand_forest() %>%
+  set_engine(engine = 'ranger') %>% 
+  set_args(mtry = NULL, # size of random subset of variables; default is floor(sqrt(number of total predictors))
+           trees = 1000, # Number of trees
+           min_n = 2,
+           probability = FALSE, # FALSE: get hard predictions (not needed for regression)
+           importance = 'impurity') %>% # we'll come back to this at the end
+  set_mode('classification') # change this for regression
+
+# Recipe
+data_rec <- recipe(HeartDisease_binary ~ ., data = heart) %>%
+  step_rm(HeartDisease) 
+
+# Workflows
+data_wf_2 <- workflow() %>%
+  add_model(rf_spec) %>%
+  add_recipe(data_rec)
+```
+
+```{r}
+set.seed(123) 
+data_fit <- fit(data_wf_2, data = heart)
+```
+
+### OOB Metrics
+```{r}
+# Custom Function to get OOB predictions, true observed outcomes and add a user-provided model label
+rf_OOB_output <- function(fit_model, model_label, truth){
+    tibble(
+          .pred_class = fit_model %>% extract_fit_engine() %>% pluck('predictions'), #OOB predictions
+          HeartDisease_binary = truth,
+          label = model_label
+      )
+}
+
+#check out the function output
+rf_OOB_output(data_fit,2, heart %>% pull(HeartDisease_binary))
+```
+
+```{r}
+# Evaluate OOB Metrics
+    rf_OOB_output(data_fit,2, heart %>% pull(HeartDisease_binary)) %>% 
+    accuracy(truth = HeartDisease_binary, estimate = .pred_class)
+```
+
+
+# Unsupervised Learning (Clustering)
+
+***Goal:*** To see what natural groupings can be found within our Heart dataset using Heirarichal clustering
+
+## Cleaning
+```{r}
+# data cleaning
+heart <- as.data.frame(heart) #Makes heart into a dataframe
+
+for (i in 1:12) {
+  heart[12,i] = heart[12,(i+1)]
+} #Shifts values in row 12 left one column since values were shifted over only in this column
+
+heart$"...13" <- NULL #Removes column which was added in import process which was mostly empty
+
+heart$Age <- as.numeric(heart$Age) #Changes Age to numeric
+heart$RestingBP<- as.numeric(heart$RestingBP) #changes RestingBP to a numeric value
+heart$MaxHR<- as.numeric(heart$MaxHR) #Changes MaxHR to numeric
+heart$Oldpeak<-as.numeric(heart$Oldpeak) #Changes OldPeak to Numeric
+heart$FastingBS<- as.numeric(heart$FastingBS) #Changes FastingBS to Numeric
+heart$HeartDisease<-as.numeric(heart$HeartDisease) #Changes HeartDisease to Numeric
+heart$Cholesterol<- as.numeric(heart$Cholesterol)
+for (i in 1:12){  #Change all character variables to integers
+  if (typeof(heart[ ,i]) == "character"){
+    heart[ ,i] <- as.factor(heart[ ,i])
+  }
+}
+
+heart <-na.omit(heart) #Removes NAs
+```
+
+## Dendograms
+```{r Tree Set up}
+set.seed(84)
+heart_sample <- heart %>%
+    slice_sample(n = 50) #Creates a new data set of 50 random samples from heart dataset
+
+heart_cluster <- suppressWarnings(hclust(daisy(heart_sample), method="complete")) # creates heirarichal dendogram
+plot(heart_cluster) #plots dendogram above
+
+heart_numeric<- heart_sample %>%
+  dplyr::select(Age, RestingBP, Cholesterol, MaxHR, Oldpeak) #Creates new dataset with fewer variables
+
+heart_test<- heart_sample %>%
+  dplyr::select(Age, RestingBP) #creates new dataset with fewer variables
+
+dist_mat_scaled <- dist(scale(as.matrix(heart_test))) #scales variables in dataset
+
+hc_complete <- hclust(dist_mat_scaled, method = "complete") #Creates new heirarichal dendogram with subset of variables
+plot(hc_complete) #plots new dendogram
+```
+
+```{r Labeled Trees}
+for (i in colnames(heart)){
+  plot(heart_cluster, labels = heart_sample[ ,i], xlab = i)
+} #plots deprogram with all variables with each variable event as the label
+```
+
+
+## With 3 Clusters
+```{r Clustering Set-up_3}
+
+heart_sample<-heart_sample%>%
+  mutate(
+    hclust_height2 = factor(cutree(heart_cluster, h = 2)), # Cut at height (h) 4
+    hclust_num4 = factor(cutree(heart_cluster, k = 4)) # Cut into 4 clusters (k)
+  )
+
+
+heart_sample<-heart_sample%>%
+  mutate(
+    hclust_height2 = factor(cutree(heart_cluster, h = 2)), # Cut at height (h) 4
+    hclust_num6 = factor(cutree(heart_cluster, k = 6)) # Cut into 6 clusters (k)
+  )
+
+
+plot(heart_cluster, labels = heart_sample$hclust_num4) #plots tree with all variables and 4 clusters labeld
+plot(heart_cluster, labels = heart_sample$hclust_num6) #plots tree with all variables and 6 clusters labeld
+
+```
+
+
+```{r}
+#chunk creates visualizations for all variables and the three clusters (from using all variables to create clusters)
+for (i in colnames(heart)) {
+  if (i %in% c("HeartDisease", "FastingBS")) {
+    print(
+      heart_sample %>%
+        ggplot(aes(x=hclust_num6, fill = factor(heart_sample[ ,i])))+
+        geom_bar(position = "fill") +
+        labs(x="Cluster", fill = i, title = i) +
+        theme_classic()
+    )
+  }
+  else if (typeof(heart_sample[ ,i]) == "double"){
+    print(
+      heart_sample %>%
+        ggplot(aes(x=hclust_num6, y = heart_sample[ ,i]))+
+        geom_boxplot() +
+        labs(x="Cluster", y= i, title = i) +
+        theme_classic()
+    )
+  }
+  else{
+    print(
+      heart_sample %>%
+        ggplot(aes(x=hclust_num6, fill = heart_sample[ ,i]))+
+        geom_bar(position = "fill") +
+        labs(x="Cluster", fill = i, title = i) +
+        theme_classic()
+    )
+  }
+}
+```

@@ -66,5 +66,6 @@ The goal of our unsupervised learning task was to see what natural groupings can
 ## Resources/Additional Info
 
 You can find a recorded presentation of our project here: https://drive.google.com/file/d/1Lo-wfCum082djZQnAe4aoLYWQO5CgraR/view?usp=sharing
+\n
 Slideshow link: https://docs.google.com/presentation/d/1mcofLmQ22B2fSFFRMPtjxekTzqYWD9Od8pW31bCowoE/edit?usp=sharing
 
